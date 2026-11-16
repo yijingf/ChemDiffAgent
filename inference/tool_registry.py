@@ -843,16 +843,51 @@ def load_tools(names: Iterable[str] | None = None) -> list[ToolSpec]:
     return [ToolSpec(name, TOOL_DESCRIPTIONS[name], runners[name]) for name in requested]
 
 
+_SMILES_INPUT_TOOLS = {
+    *_PREDICTOR_CLASS_NAMES, "RXNRetrosynthetic", "TestMolecule", "GetMolFormula",
+    "CalculateTPSA", "GetExactMolceularWeight", "SMILESToWeight", "GetCrippenDescriptors",
+    "GetHBDNum", "GetHBANum", "GetRingsNum", "GetRotatableBondsNum", "GetFractionCSP3",
+    "FuncGroups", "cactus/CalculateDruglikeness", "cactus/CalculateLogP",
+    "chemcrow/ControlChemCheck", "chemcrow/PatentCheck",
+}
+
+
+def normalize_tool_arguments(name: str, arguments: Any) -> Any:
+    """Remove boundary quotes only from validated single-molecule SMILES inputs.
+
+    Original arguments are retained by callers for auditing. Names, formulas,
+    reaction strings, and arbitrary malformed structures are not repaired.
+    """
+    if name not in _SMILES_INPUT_TOOLS or not isinstance(arguments, dict):
+        return arguments
+    value = arguments.get("input")
+    if not isinstance(value, str):
+        return arguments
+    raw = value.strip()
+    candidate = raw.strip("\"'").strip()
+    if candidate == raw or not candidate:
+        return arguments
+    try:
+        Chem, *_ = _rdkit_modules()
+    except ToolBackendUnavailable:
+        return arguments
+    # Do not use _mol here: it already applies its own historical tolerance.
+    if Chem.MolFromSmiles(candidate) is None:
+        return arguments
+    return {**arguments, "input": candidate}
+
+
 class ToolExecutor:
     def __init__(self, tools: Iterable[ToolSpec], timeout_seconds: int = 120):
         self.tools = {tool.name: tool for tool in tools}
         self.timeout_seconds = int(timeout_seconds)
+        self.last_arguments = None
 
     def execute(self, name: str, arguments: Any) -> tuple[str, bool]:
+        self.last_arguments = arguments
         tool = self.tools.get(name)
         if tool is None:
             return f'Error: Unknown tool "{name}".', False
-        value = arguments.get("input") if isinstance(arguments, dict) and "input" in arguments else arguments
 
         previous_handler = None
         if self.timeout_seconds > 0 and hasattr(signal, "SIGALRM"):
@@ -863,6 +898,8 @@ class ToolExecutor:
             signal.signal(signal.SIGALRM, timeout_handler)
             signal.setitimer(signal.ITIMER_REAL, float(self.timeout_seconds))
         try:
+            self.last_arguments = normalize_tool_arguments(name, arguments)
+            value = self.last_arguments.get("input") if isinstance(self.last_arguments, dict) and "input" in self.last_arguments else self.last_arguments
             result = tool(value)
             return str(result), True
         except Exception as exc:

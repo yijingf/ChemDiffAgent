@@ -316,6 +316,7 @@ def run_one(
                 "tool": parsed.tool_name,
                 "input": parsed.tool_arguments.get("input", parsed.tool_arguments),
                 "arguments": parsed.tool_arguments,
+                "executed_arguments": executor.last_arguments,
                 "output": result,
                 "success": success,
                 "seconds": round(tool_seconds, 6),
