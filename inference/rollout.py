@@ -10,6 +10,7 @@ import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
+from copy import deepcopy
 
 from tqdm import tqdm
 
@@ -250,10 +251,28 @@ def run_one(
     max_context_tokens: int,
     tool_timeout_seconds: int,
     print_turns: bool = False,
+    resume_record: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     question = str(item[QUESTION_FIELD])
     sample_id = str(item.get("sample_id") or "sample")
     system_prompt = unified_system_prompt()
+    saved_calls = {}
+    retry_turn = 0
+    if resume_record is not None:
+        saved_calls = {call['turn']: call for call in resume_record['tool_use_chain']}
+        retry_turn = min(turn for turn, call in saved_calls.items() if call.get('success') is False)
+        if max_turns <= retry_turn:
+            raise ValueError('max_turns must allow a new model response after the failed tool turn')
+        if len(resume_record.get('raw_generations', [])) < retry_turn:
+            raise ValueError('Saved raw_generations do not contain the failed tool turn')
+        for turn in range(1, retry_turn + 1):
+            parsed_prefix = parse_turn(resume_record['raw_generations'][turn - 1])
+            call = saved_calls.get(turn)
+            if (call is None or parsed_prefix.kind != 'tool'
+                    or parsed_prefix.tool_name != call.get('tool')
+                    or parsed_prefix.tool_arguments != call.get('arguments')):
+                raise ValueError('Saved model prefix and tool_use_chain are inconsistent')
+        system_prompt = resume_record['messages'][0]['content']
     state = RolloutState(
         question=question,
         answer=item.get("answer", ""),
@@ -273,8 +292,10 @@ def run_one(
             state.termination_reason = "max_context_tokens"
             break
 
-        raw = generator.generate(state.context, max_new_tokens=max_new_tokens)
-        timer = getattr(generator, "step_timer", None)
+        reuse = resume_record is not None and turn_index <= retry_turn
+        raw = (resume_record['raw_generations'][turn_index - 1] if reuse
+               else generator.generate(state.context, max_new_tokens=max_new_tokens))
+        timer = getattr(generator, "step_timer", None) if not reuse else None
         if timer is not None:
             state.forward_steps.extend({"turn": turn_index, **record} for record in timer.records)
         state.raw_generations.append(raw)
@@ -306,6 +327,17 @@ def run_one(
             break
 
         assert parsed.tool_name is not None and parsed.tool_arguments is not None
+        if reuse:
+            saved = saved_calls.get(turn_index)
+            if saved is None or saved['tool'] != parsed.tool_name or saved['arguments'] != parsed.tool_arguments:
+                raise ValueError('Saved raw tool call does not match tool_use_chain; cannot safely continue')
+        if reuse and turn_index < retry_turn:
+            # Rebuild context from saved successful observations, without executing tools.
+            state.tool_use_chain.append(deepcopy(saved))
+            result = saved['output']
+            state.messages.append({'role': 'user', 'content': f'<tool_response>\n{result}\n</tool_response>'})
+            state.context += build_tool_response(result)
+            continue
         tool_started_at = time.perf_counter()
         result, success = executor.execute(parsed.tool_name, parsed.tool_arguments)
         tool_seconds = time.perf_counter() - tool_started_at
@@ -356,6 +388,15 @@ def run_one(
                    "forward_steps": state.forward_steps},
         "original_data": item,
     }
+    if resume_record is not None:
+        row['continuation'] = {
+            'retry_from_tool_turn': retry_turn, 'reused_model_turns': retry_turn,
+            'original_prediction': resume_record.get('prediction'),
+            'original_termination_reason': resume_record.get('termination_reason'),
+            'original_timing': resume_record.get('timing'),
+            'original_tool_use_chain': resume_record.get('tool_use_chain'),
+            'timing_scope': 'continuation_run_only',
+        }
     return make_json_safe(row)
 
 
@@ -410,7 +451,15 @@ def run_dataset(
     print_turns: bool,
     num_shards: int = 1,
     shard_index: int = 0,
+    retry_results: str | None = None,
 ) -> dict[str, Any]:
+    if retry_results:
+        if max_samples or sample_id or num_rolls != 1 or num_shards != 1 or resume:
+            raise ValueError('Continuation requires all samples, one roll/shard, and resume=false')
+        return continue_failed_tools(retry_results, output_path, generator, tools,
+                                     max_turns=max_turns, max_new_tokens=max_new_tokens,
+                                     max_context_tokens=max_context_tokens,
+                                     tool_timeout_seconds=tool_timeout_seconds, print_turns=print_turns)
     rows = read_dataset(input_path)
     if sample_id:
         rows = [row for row in rows if str(row.get("sample_id")) == sample_id]
@@ -464,3 +513,35 @@ def run_dataset(
         "shard_index": shard_index,
         **counts,
     }
+
+
+def continue_failed_tools(source_path, output_path, generator, tools, **settings):
+    """Preserve source order and good rows; regenerate only after failed tools."""
+    source = Path(source_path).resolve()
+    target = Path(output_path).resolve()
+    if source == target:
+        raise ValueError('Continuation must not overwrite original results')
+    with source.open(encoding='utf-8') as stream:
+        rows = [json.loads(line) for line in stream if line.strip()]
+    target.parent.mkdir(parents=True, exist_ok=True)
+    counts = dict(total=len(rows), unchanged=0, continued=0, continued_answered=0)
+    audit_path = target.with_suffix('.continuation.jsonl')
+    with target.open('x', encoding='utf-8') as stream, audit_path.open('x', encoding='utf-8') as audit:
+        for index, old in enumerate(tqdm(rows, desc='Continue failed tools')):
+            if any(call.get('success') is False for call in old.get('tool_use_chain', [])):
+                if old.get('tool_replay'):
+                    raise ValueError('Use original inference results, not tool-only merged replay results')
+                result = run_one(old['original_data'], generator, tools, resume_record=old, **settings)
+                result['roll_idx'] = old.get('roll_idx', 0)
+                metadata = result.pop('continuation')
+                audit.write(json.dumps(dict(index=index, sample_id=old.get('sample_id'),
+                                           roll_idx=old.get('roll_idx', 0), **metadata), ensure_ascii=False) + '\n')
+                audit.flush()
+                counts['continued'] += 1
+                counts['continued_answered'] += result['termination_reason'] == 'answer'
+            else:
+                result = old
+                counts['unchanged'] += 1
+            stream.write(json.dumps(result, ensure_ascii=False) + '\n')
+            stream.flush()
+    return dict(input=str(source), output=str(target), continuation=str(audit_path), **counts)

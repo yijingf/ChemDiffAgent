@@ -1,5 +1,25 @@
 # NPU inference
 
+## 失败工具修复后继续生成 prediction
+
+```bash
+bash scripts/run_inference_npu.sh inference/configs/inference_npu_continue.yaml
+```
+
+将 `inference.retry_results` 指向原始 inference 的完整结果（不要使用工具 replay 合并文件），
+`model.path` 使用同一个 checkpoint，保留原来的生成参数。所有原样本按原顺序写到
+`res/<datetime>-inference_npu_continue/single_test.jsonl`。
+没有 success=false 工具调用的样本原样复制；其余样本复用首次失败工具调用之前及该轮
+已保存的 raw_generations，复用之前成功的工具结果，只从首次失败处重新执行工具并让
+模型继续生成。失败之后的旧模型回复全部丢弃，不重新生成失败之前的模型文本。
+模型仍需重新加载并 prefill 已保存上下文，不复用跨进程的 KV cache。
+选择失败样本严格依据 success=false；工具返回错误提示但被标为 success=true 的情况
+不会自动识别。主结果不添加重跑索引或标记；单独的 `single_test.continuation.jsonl`
+保存重跑样本的 index（从 0 开始）、sample_id、roll_idx、旧 prediction、工具链、时延
+及续跑起点。索引对应原文件/完整新结果的样本顺序。
+新 timing 仅覆盖本次续跑，不包含历史生成耗时。没有新增模型生成时的旧样本保留原 timing。
+max_turns 是整个轨迹的轮数上限，必须大于首次失败的工具轮次，给新答案留出生成机会。
+
 ## SMILES 参数的引号兼容
 
 单分子 SMILES 工具（包括六类性质预测和逆合成）执行前允许去掉首尾的单/双引号，
