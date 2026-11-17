@@ -55,7 +55,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--tool-timeout-seconds", type=int, default=120)
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--retry-results", help="Original results: continue failed tools and preserve all other rows")
-    parser.add_argument("--retry-failures", choices=["all", "timeout"], default="all")
+    parser.add_argument("--retry-failures", choices=["all", "timeout", "http404"], default="all")
     parser.add_argument("--retry-tool", help="Only continue samples with a failed call to this exact tool")
     parser.add_argument("--print-turns", action="store_true")
     parser.add_argument("--seed", type=int, default=10086)

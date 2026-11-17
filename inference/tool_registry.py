@@ -20,6 +20,7 @@ import shutil
 import signal
 import sys
 import urllib.parse
+import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
@@ -104,17 +105,35 @@ def _items(value: Any, count: int | None = None) -> list[Any]:
     return result
 
 
-def _json_url(url: str, timeout: int = 30) -> dict[str, Any]:
-    request = urllib.request.Request(url, headers={"User-Agent": "DLLM-Science/1.0"})
+def _json_url(url: str, timeout: int = 30, data: bytes | None = None) -> dict[str, Any]:
+    request = urllib.request.Request(url, data=data, headers={"User-Agent": "DLLM-Science/1.0"})
     with urllib.request.urlopen(request, timeout=timeout) as response:
         return json.loads(response.read().decode("utf-8"))
 
 
 def _pubchem_cid(query: Any) -> int:
     encoded = urllib.parse.quote(str(query).strip(), safe="")
-    data = _json_url(
-        f"https://pubchem.ncbi.nlm.nih.gov/rest/pug/compound/name/{encoded}/cids/JSON"
-    )
+    try:
+        data = _json_url(
+            f"https://pubchem.ncbi.nlm.nih.gov/rest/pug/compound/name/{encoded}/cids/JSON"
+        )
+    except urllib.error.HTTPError as exc:
+        if exc.code != 404:
+            raise
+        # Preserve successful name lookups, including names which could also
+        # be interpreted as SMILES. Fall back only on a valid unchanged structure.
+        try:
+            Chem, *_ = _rdkit_modules()
+        except ToolBackendUnavailable:
+            raise exc
+        smiles = str(query).strip()
+        if Chem.MolFromSmiles(smiles) is None:
+            raise exc
+        # POST avoids interpreting SMILES slashes as URL path separators.
+        data = _json_url(
+            "https://pubchem.ncbi.nlm.nih.gov/rest/pug/compound/smiles/cids/JSON",
+            data=urllib.parse.urlencode({"smiles": smiles}).encode("utf-8"),
+        )
     cids = data.get("IdentifierList", {}).get("CID", [])
     if not cids:
         raise ValueError(f"PubChem found no compound for {query!r}")

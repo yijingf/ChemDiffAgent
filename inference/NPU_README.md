@@ -1,5 +1,24 @@
 # NPU inference
 
+## 补测 Query2CAS 的 HTTP 404
+
+```bash
+bash scripts/run_inference_npu.sh inference/configs/inference_npu_continue_query2cas.yaml
+```
+
+retry_results 指向最新完整结果；retry_tool=chemcrow/Query2CAS 且 retry_failures=http404，
+只选择这个工具返回 HTTP 404 的样本，重新查工具后继续模型生成。该配置默认指向
+20261117_143104_278235 的完整结果，其中应选择 18 条，原样保留其余 629 条。
+输出仍包含原顺序的全部 647 条；索引另存 single_test.continuation.jsonl。
+若之后已有更新的完整结果，应修改 retry_results，避免丢失此前的补测结果。
+名称查询 404 后会对有效 SMILES 回退到结构接口；找到 CID 仍不保证存在 CAS。
+
+PubChem CID 查询保留名称接口优先：仅名称请求返回 HTTP 404，且 RDKit 确认
+原始输入为有效 SMILES 时，回退到 SMILES POST 查询。不会修改输入结构，不会
+对超时、403、5xx 等其他异常执行回退。此逻辑同时用于 Query2CAS、NameToSMILES
+和 get_compound_CID 等复用 CID 查询的工具。找到 CID 不保证一定存在 CAS 信息；
+该情况仍按原有工具错误处理，不能将工具执行成功直接作为答案正确。
+
 只续跑 PatentCheck 失败样本可使用 `inference/configs/inference_npu_continue_patent.yaml`。
 其中 `inference.retry_failures: all`、`inference.retry_tool: chemcrow/PatentCheck`，
 仅筛选这个工具失败的样本。retry_results 指向最新完整结果，其他样本和顺序保持不变。

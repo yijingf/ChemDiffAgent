@@ -525,14 +525,16 @@ def continue_failed_tools(source_path, output_path, generator, tools, retry_fail
     target = Path(output_path).resolve()
     if source == target:
         raise ValueError('Continuation must not overwrite original results')
-    if retry_failures not in {'all', 'timeout'}:
-        raise ValueError('retry_failures must be all or timeout')
+    if retry_failures not in {'all', 'timeout', 'http404'}:
+        raise ValueError('retry_failures must be all, timeout or http404')
     with source.open(encoding='utf-8') as stream:
         rows = [json.loads(line) for line in stream if line.strip()]
     def selected(row):
         return any(call.get('success') is False and
                    (retry_tool is None or call.get('tool') == retry_tool) and
-                   (retry_failures == 'all' or 'TimeoutError' in str(call.get('output', '')))
+                   (retry_failures == 'all'
+                    or (retry_failures == 'timeout' and 'TimeoutError' in str(call.get('output', '')))
+                    or (retry_failures == 'http404' and 'HTTPError: HTTP Error 404:' in str(call.get('output', ''))))
                    for call in row.get('tool_use_chain', []))
     print(f'Continuation selection={retry_failures}, tool={retry_tool or "any"}: '
           f'{sum(selected(row) for row in rows)}/{len(rows)} samples')
