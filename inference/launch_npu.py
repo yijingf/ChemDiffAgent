@@ -17,6 +17,7 @@ OPTIONS = {
     'temperature', 'top_k', 'top_p', 'remasking_strategy', 'confidence_threshold',
     'tool_timeout_seconds', 'resume', 'print_turns', 'seed', 'num_shards', 'shard_index',
     'retry_results',
+    'retry_failures',
 }
 
 

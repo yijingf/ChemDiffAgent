@@ -452,11 +452,13 @@ def run_dataset(
     num_shards: int = 1,
     shard_index: int = 0,
     retry_results: str | None = None,
+    retry_failures: str = "all",
 ) -> dict[str, Any]:
     if retry_results:
         if max_samples or sample_id or num_rolls != 1 or num_shards != 1 or resume:
             raise ValueError('Continuation requires all samples, one roll/shard, and resume=false')
         return continue_failed_tools(retry_results, output_path, generator, tools,
+                                     retry_failures=retry_failures,
                                      max_turns=max_turns, max_new_tokens=max_new_tokens,
                                      max_context_tokens=max_context_tokens,
                                      tool_timeout_seconds=tool_timeout_seconds, print_turns=print_turns)
@@ -515,20 +517,27 @@ def run_dataset(
     }
 
 
-def continue_failed_tools(source_path, output_path, generator, tools, **settings):
+def continue_failed_tools(source_path, output_path, generator, tools, retry_failures="all", **settings):
     """Preserve source order and good rows; regenerate only after failed tools."""
     source = Path(source_path).resolve()
     target = Path(output_path).resolve()
     if source == target:
         raise ValueError('Continuation must not overwrite original results')
+    if retry_failures not in {'all', 'timeout'}:
+        raise ValueError('retry_failures must be all or timeout')
     with source.open(encoding='utf-8') as stream:
         rows = [json.loads(line) for line in stream if line.strip()]
+    def selected(row):
+        return any(call.get('success') is False and
+                   (retry_failures == 'all' or 'TimeoutError' in str(call.get('output', '')))
+                   for call in row.get('tool_use_chain', []))
+    print(f'Continuation selection={retry_failures}: {sum(selected(row) for row in rows)}/{len(rows)} samples')
     target.parent.mkdir(parents=True, exist_ok=True)
     counts = dict(total=len(rows), unchanged=0, continued=0, continued_answered=0)
     audit_path = target.with_suffix('.continuation.jsonl')
     with target.open('x', encoding='utf-8') as stream, audit_path.open('x', encoding='utf-8') as audit:
         for index, old in enumerate(tqdm(rows, desc='Continue failed tools')):
-            if any(call.get('success') is False for call in old.get('tool_use_chain', [])):
+            if selected(old):
                 if old.get('tool_replay'):
                     raise ValueError('Use original inference results, not tool-only merged replay results')
                 result = run_one(old['original_data'], generator, tools, resume_record=old, **settings)

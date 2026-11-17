@@ -1,5 +1,18 @@
 # NPU inference
 
+## 仅续跑仍然超时的样本
+
+```bash
+bash scripts/run_inference_npu.sh inference/configs/inference_npu_continue_timeout.yaml
+```
+
+配置中的 retry_results 指向最新完整 continuation 结果；retry_failures=timeout
+仅选择含 success=false 且错误为 TimeoutError 的样本，all 则选择所有工具失败样本。
+新配置将单次工具超时放宽为 600 秒，可自行调整。其余样本不动，输出仍保留原始
+全部样本和顺序；重跑索引另存。即使旧 prediction 被判正确，只要工具曾超时也会选中。
+本次续跑会从该样本最早的失败调用处开始，保留之前的模型输出和成功工具结果。
+从 continuation 的完整结果可以再次续跑；不要使用 tool-only replay 的合并结果。
+
 ## 失败工具修复后继续生成 prediction
 
 ```bash
