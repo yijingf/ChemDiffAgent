@@ -56,6 +56,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--retry-results", help="Original results: continue failed tools and preserve all other rows")
     parser.add_argument("--retry-failures", choices=["all", "timeout"], default="all")
+    parser.add_argument("--retry-tool", help="Only continue samples with a failed call to this exact tool")
     parser.add_argument("--print-turns", action="store_true")
     parser.add_argument("--seed", type=int, default=10086)
     parser.add_argument("--num-shards", type=int, default=1)
@@ -160,6 +161,7 @@ def main() -> None:
             shard_index=args.shard_index,
             retry_results=args.retry_results,
             retry_failures=args.retry_failures,
+            retry_tool=args.retry_tool,
         )
     print(json.dumps(summary, ensure_ascii=False, indent=2))
 

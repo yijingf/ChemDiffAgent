@@ -18,6 +18,7 @@ OPTIONS = {
     'tool_timeout_seconds', 'resume', 'print_turns', 'seed', 'num_shards', 'shard_index',
     'retry_results',
     'retry_failures',
+    'retry_tool',
 }
 
 

@@ -1,5 +1,10 @@
 # NPU inference
 
+只续跑 PatentCheck 失败样本可使用 `inference/configs/inference_npu_continue_patent.yaml`。
+其中 `inference.retry_failures: all`、`inference.retry_tool: chemcrow/PatentCheck`，
+仅筛选这个工具失败的样本。retry_results 指向最新完整结果，其他样本和顺序保持不变。
+retry_tool 可改为其他精确工具名；省略时不按工具名筛选。
+
 ## 仅续跑仍然超时的样本
 
 ```bash
