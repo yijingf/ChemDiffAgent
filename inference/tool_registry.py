@@ -332,7 +332,23 @@ def _query_to_cas(value: Any) -> str:
 
 
 def _analyze_combustion(value: Any) -> str:
-    co2, h2o = (float(x) for x in _items(value, 2))
+    value = _literalish(value)
+    if isinstance(value, dict):
+        fields = ("CO2_grams", "H2O_grams")
+        missing = [key for key in fields if key not in value]
+        if missing:
+            raise ValueError(f"Combustion analysis is missing required fields: {', '.join(missing)}")
+        unknown = set(value) - set(fields)
+        if unknown:
+            raise ValueError(f"Unknown combustion analysis fields: {', '.join(sorted(unknown))}")
+        values = [value[key] for key in fields]
+    else:
+        values = _items(value, 2)
+    if any(isinstance(x, bool) for x in values):
+        raise ValueError("Combustion masses must be numeric grams, not booleans")
+    co2, h2o = (float(x) for x in values)
+    if not all(math.isfinite(x) and x > 0 for x in (co2, h2o)):
+        raise ValueError("Combustion masses must be finite positive grams")
     from chemlib.thermochemistry import combustion_analysis
 
     return str(combustion_analysis(co2, h2o))

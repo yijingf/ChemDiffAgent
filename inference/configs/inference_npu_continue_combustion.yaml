@@ -1,0 +1,39 @@
+# Continue combustion-analysis failures only. Set retry_results to latest full results.
+runtime:
+  cann_env: /data/workspace/zyc/CANN/cann/set_env.sh
+  env:
+    CHEMTOOL_AGENT_ROOT: /data/ChemDiffAgent/third_party/ChemToolAgent
+    UNICORE_ROOT: /data/ChemDiffAgent/third_party/Uni-Core
+    RXN_T5CHEM_ROOT: /data/ChemDiffAgent/third_party/t5chem
+    CONTROLLED_CHEMICALS_CSV: /data/ChemDiffAgent/third_party/ChemistryAgent/agent/toolpool/chemcrow/data/chem_wep_smi.csv
+    RXN_T5CHEM_DEVICE: cpu
+model:
+  path: /home/f00969507/ChemDiffAgent/res/20261115_183820_201469-chemdiffagent_sft_full_npu/output/ckpt_2/optimized
+data:
+  directory: /data/ChemDiffAgent/dataset/benchmark
+  datasets:
+  - single_test
+inference:
+  retry_results: res/20261117_144654_900709-inference_npu_continue_query2cas/single_test.jsonl
+  device: npu:0
+  dtype: bf16
+  max_samples: 0
+  num_rolls: 1
+  max_turns: 7
+  max_new_tokens: 1024
+  max_context_tokens: 32768
+  block_length: 64
+  denoising_steps: 64
+  temperature: 1.0
+  top_k: 1
+  top_p: 1.0
+  remasking_strategy: low_confidence_static
+  confidence_threshold: 0.9
+  tool_timeout_seconds: 120
+  resume: false
+  print_turns: true
+  seed: 10086
+  retry_failures: all
+  retry_tool: chem_lib/analyze_combustion
+profiling:
+  enabled: false

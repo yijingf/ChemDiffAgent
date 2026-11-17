@@ -1,5 +1,11 @@
 # NPU inference
 
+燃烧分析工具接受 `[CO2_grams, H2O_grams]` 列表或含 `CO2_grams`、`H2O_grams`
+两个字段的字典（字段顺序无关）。缺少字段、未知字段或非有限/非正质量会报错，
+不会从题目中猜测缺失值。只续跑此工具失败样本可使用
+`inference/configs/inference_npu_continue_combustion.yaml`；retry_results 应指向最新
+完整结果。原始参数和模型输出保留，属于工具输入格式兼容策略。
+
 ## 补测 Query2CAS 的 HTTP 404
 
 ```bash
