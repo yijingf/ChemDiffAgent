@@ -1,5 +1,78 @@
 # NPU inference
 
+燃烧分析工具接受 `[CO2_grams, H2O_grams]` 列表或含 `CO2_grams`、`H2O_grams`
+两个字段的字典（字段顺序无关）。缺少字段、未知字段或非有限/非正质量会报错，
+不会从题目中猜测缺失值。只续跑此工具失败样本可使用
+`inference/configs/inference_npu_continue_combustion.yaml`；retry_results 应指向最新
+完整结果。原始参数和模型输出保留，属于工具输入格式兼容策略。
+
+## 补测 Query2CAS 的 HTTP 404
+
+```bash
+bash scripts/run_inference_npu.sh inference/configs/inference_npu_continue_query2cas.yaml
+```
+
+retry_results 指向最新完整结果；retry_tool=chemcrow/Query2CAS 且 retry_failures=http404，
+只选择这个工具返回 HTTP 404 的样本，重新查工具后继续模型生成。该配置默认指向
+20261117_143104_278235 的完整结果，其中应选择 18 条，原样保留其余 629 条。
+输出仍包含原顺序的全部 647 条；索引另存 single_test.continuation.jsonl。
+若之后已有更新的完整结果，应修改 retry_results，避免丢失此前的补测结果。
+名称查询 404 后会对有效 SMILES 回退到结构接口；找到 CID 仍不保证存在 CAS。
+
+PubChem CID 查询保留名称接口优先：仅名称请求返回 HTTP 404，且 RDKit 确认
+原始输入为有效 SMILES 时，回退到 SMILES POST 查询。不会修改输入结构，不会
+对超时、403、5xx 等其他异常执行回退。此逻辑同时用于 Query2CAS、NameToSMILES
+和 get_compound_CID 等复用 CID 查询的工具。找到 CID 不保证一定存在 CAS 信息；
+该情况仍按原有工具错误处理，不能将工具执行成功直接作为答案正确。
+
+只续跑 PatentCheck 失败样本可使用 `inference/configs/inference_npu_continue_patent.yaml`。
+其中 `inference.retry_failures: all`、`inference.retry_tool: chemcrow/PatentCheck`，
+仅筛选这个工具失败的样本。retry_results 指向最新完整结果，其他样本和顺序保持不变。
+retry_tool 可改为其他精确工具名；省略时不按工具名筛选。
+
+## 仅续跑仍然超时的样本
+
+```bash
+bash scripts/run_inference_npu.sh inference/configs/inference_npu_continue_timeout.yaml
+```
+
+配置中的 retry_results 指向最新完整 continuation 结果；retry_failures=timeout
+仅选择含 success=false 且错误为 TimeoutError 的样本，all 则选择所有工具失败样本。
+新配置将单次工具超时放宽为 600 秒，可自行调整。其余样本不动，输出仍保留原始
+全部样本和顺序；重跑索引另存。即使旧 prediction 被判正确，只要工具曾超时也会选中。
+本次续跑会从该样本最早的失败调用处开始，保留之前的模型输出和成功工具结果。
+从 continuation 的完整结果可以再次续跑；不要使用 tool-only replay 的合并结果。
+
+## 失败工具修复后继续生成 prediction
+
+```bash
+bash scripts/run_inference_npu.sh inference/configs/inference_npu_continue.yaml
+```
+
+将 `inference.retry_results` 指向原始 inference 的完整结果（不要使用工具 replay 合并文件），
+`model.path` 使用同一个 checkpoint，保留原来的生成参数。所有原样本按原顺序写到
+`res/<datetime>-inference_npu_continue/single_test.jsonl`。
+没有 success=false 工具调用的样本原样复制；其余样本复用首次失败工具调用之前及该轮
+已保存的 raw_generations，复用之前成功的工具结果，只从首次失败处重新执行工具并让
+模型继续生成。失败之后的旧模型回复全部丢弃，不重新生成失败之前的模型文本。
+模型仍需重新加载并 prefill 已保存上下文，不复用跨进程的 KV cache。
+选择失败样本严格依据 success=false；工具返回错误提示但被标为 success=true 的情况
+不会自动识别。主结果不添加重跑索引或标记；单独的 `single_test.continuation.jsonl`
+保存重跑样本的 index（从 0 开始）、sample_id、roll_idx、旧 prediction、工具链、时延
+及续跑起点。索引对应原文件/完整新结果的样本顺序。
+新 timing 仅覆盖本次续跑，不包含历史生成耗时。没有新增模型生成时的旧样本保留原 timing。
+max_turns 是整个轨迹的轮数上限，必须大于首次失败的工具轮次，给新答案留出生成机会。
+
+## SMILES 参数的引号兼容
+
+单分子 SMILES 工具（包括六类性质预测和逆合成）执行前允许去掉首尾的单/双引号，
+但仅在去掉后 RDKit 能解析为有效分子时采用。未改变分子内部字符，不处理名称、
+化学式、正向反应字符串或不合法结构。缺少 RDKit 时不清理参数。
+结果的 `arguments` 和 `raw_generations` 继续保留模型原始输出，
+`executed_arguments` 记录实际执行参数；replay 及合并结果也保留该字段。
+这属于执行侧输入兼容策略，比较 benchmark 时应对所有模型使用相同策略，并将
+原始参数合法性与修正后的执行成功率区分报告。旧结果不会自动改变，须重新执行工具。
+
 ## 仅补执行工具，不运行主模型
 
 ```bash

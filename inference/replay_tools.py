@@ -59,6 +59,7 @@ def execute_calls(calls, executor, destination):
             started = time.perf_counter()
             output, success = executor.execute(call['tool'], call['arguments'])
             result = dict(call, output=output, success=success, seconds=time.perf_counter() - started)
+            result['executed_arguments'] = executor.last_arguments
             stream.write(json.dumps(result, ensure_ascii=False) + '\n')
             stream.flush()
             counts['succeeded' if success else 'failed'] += 1
@@ -93,6 +94,8 @@ def merge_results(rows, replayed):
                 history.append({key: deepcopy(call.get(key)) for key in ('output', 'success', 'seconds')})
                 call.update(output=result['output'], success=result['success'], seconds=result['seconds'],
                             replayed=True)
+                if 'executed_arguments' in result:
+                    call['executed_arguments'] = deepcopy(result['executed_arguments'])
             if 'tool_replay' not in row:
                 row['tool_replay'] = dict(original_evaluation=deepcopy(row.get('evaluation', {})),
                                           prediction_recomputed=False, trajectory_recomputed=False)

@@ -20,6 +20,7 @@ import shutil
 import signal
 import sys
 import urllib.parse
+import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
@@ -104,17 +105,35 @@ def _items(value: Any, count: int | None = None) -> list[Any]:
     return result
 
 
-def _json_url(url: str, timeout: int = 30) -> dict[str, Any]:
-    request = urllib.request.Request(url, headers={"User-Agent": "DLLM-Science/1.0"})
+def _json_url(url: str, timeout: int = 30, data: bytes | None = None) -> dict[str, Any]:
+    request = urllib.request.Request(url, data=data, headers={"User-Agent": "DLLM-Science/1.0"})
     with urllib.request.urlopen(request, timeout=timeout) as response:
         return json.loads(response.read().decode("utf-8"))
 
 
 def _pubchem_cid(query: Any) -> int:
     encoded = urllib.parse.quote(str(query).strip(), safe="")
-    data = _json_url(
-        f"https://pubchem.ncbi.nlm.nih.gov/rest/pug/compound/name/{encoded}/cids/JSON"
-    )
+    try:
+        data = _json_url(
+            f"https://pubchem.ncbi.nlm.nih.gov/rest/pug/compound/name/{encoded}/cids/JSON"
+        )
+    except urllib.error.HTTPError as exc:
+        if exc.code != 404:
+            raise
+        # Preserve successful name lookups, including names which could also
+        # be interpreted as SMILES. Fall back only on a valid unchanged structure.
+        try:
+            Chem, *_ = _rdkit_modules()
+        except ToolBackendUnavailable:
+            raise exc
+        smiles = str(query).strip()
+        if Chem.MolFromSmiles(smiles) is None:
+            raise exc
+        # POST avoids interpreting SMILES slashes as URL path separators.
+        data = _json_url(
+            "https://pubchem.ncbi.nlm.nih.gov/rest/pug/compound/smiles/cids/JSON",
+            data=urllib.parse.urlencode({"smiles": smiles}).encode("utf-8"),
+        )
     cids = data.get("IdentifierList", {}).get("CID", [])
     if not cids:
         raise ValueError(f"PubChem found no compound for {query!r}")
@@ -313,7 +332,23 @@ def _query_to_cas(value: Any) -> str:
 
 
 def _analyze_combustion(value: Any) -> str:
-    co2, h2o = (float(x) for x in _items(value, 2))
+    value = _literalish(value)
+    if isinstance(value, dict):
+        fields = ("CO2_grams", "H2O_grams")
+        missing = [key for key in fields if key not in value]
+        if missing:
+            raise ValueError(f"Combustion analysis is missing required fields: {', '.join(missing)}")
+        unknown = set(value) - set(fields)
+        if unknown:
+            raise ValueError(f"Unknown combustion analysis fields: {', '.join(sorted(unknown))}")
+        values = [value[key] for key in fields]
+    else:
+        values = _items(value, 2)
+    if any(isinstance(x, bool) for x in values):
+        raise ValueError("Combustion masses must be numeric grams, not booleans")
+    co2, h2o = (float(x) for x in values)
+    if not all(math.isfinite(x) and x > 0 for x in (co2, h2o)):
+        raise ValueError("Combustion masses must be finite positive grams")
     from chemlib.thermochemistry import combustion_analysis
 
     return str(combustion_analysis(co2, h2o))
@@ -843,16 +878,51 @@ def load_tools(names: Iterable[str] | None = None) -> list[ToolSpec]:
     return [ToolSpec(name, TOOL_DESCRIPTIONS[name], runners[name]) for name in requested]
 
 
+_SMILES_INPUT_TOOLS = {
+    *_PREDICTOR_CLASS_NAMES, "RXNRetrosynthetic", "TestMolecule", "GetMolFormula",
+    "CalculateTPSA", "GetExactMolceularWeight", "SMILESToWeight", "GetCrippenDescriptors",
+    "GetHBDNum", "GetHBANum", "GetRingsNum", "GetRotatableBondsNum", "GetFractionCSP3",
+    "FuncGroups", "cactus/CalculateDruglikeness", "cactus/CalculateLogP",
+    "chemcrow/ControlChemCheck", "chemcrow/PatentCheck",
+}
+
+
+def normalize_tool_arguments(name: str, arguments: Any) -> Any:
+    """Remove boundary quotes only from validated single-molecule SMILES inputs.
+
+    Original arguments are retained by callers for auditing. Names, formulas,
+    reaction strings, and arbitrary malformed structures are not repaired.
+    """
+    if name not in _SMILES_INPUT_TOOLS or not isinstance(arguments, dict):
+        return arguments
+    value = arguments.get("input")
+    if not isinstance(value, str):
+        return arguments
+    raw = value.strip()
+    candidate = raw.strip("\"'").strip()
+    if candidate == raw or not candidate:
+        return arguments
+    try:
+        Chem, *_ = _rdkit_modules()
+    except ToolBackendUnavailable:
+        return arguments
+    # Do not use _mol here: it already applies its own historical tolerance.
+    if Chem.MolFromSmiles(candidate) is None:
+        return arguments
+    return {**arguments, "input": candidate}
+
+
 class ToolExecutor:
     def __init__(self, tools: Iterable[ToolSpec], timeout_seconds: int = 120):
         self.tools = {tool.name: tool for tool in tools}
         self.timeout_seconds = int(timeout_seconds)
+        self.last_arguments = None
 
     def execute(self, name: str, arguments: Any) -> tuple[str, bool]:
+        self.last_arguments = arguments
         tool = self.tools.get(name)
         if tool is None:
             return f'Error: Unknown tool "{name}".', False
-        value = arguments.get("input") if isinstance(arguments, dict) and "input" in arguments else arguments
 
         previous_handler = None
         if self.timeout_seconds > 0 and hasattr(signal, "SIGALRM"):
@@ -863,6 +933,8 @@ class ToolExecutor:
             signal.signal(signal.SIGALRM, timeout_handler)
             signal.setitimer(signal.ITIMER_REAL, float(self.timeout_seconds))
         try:
+            self.last_arguments = normalize_tool_arguments(name, arguments)
+            value = self.last_arguments.get("input") if isinstance(self.last_arguments, dict) and "input" in self.last_arguments else self.last_arguments
             result = tool(value)
             return str(result), True
         except Exception as exc:
